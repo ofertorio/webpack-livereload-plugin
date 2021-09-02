@@ -1,25 +1,29 @@
 /* jshint node:true */
-const crypto = require('crypto');
-const lr = require('tiny-lr');
-const portfinder = require('portfinder');
-const anymatch = require('anymatch');
+const crypto = require("crypto");
+const lr = require("tiny-lr");
+const path = require("path");
+const portfinder = require("portfinder");
+const anymatch = require("anymatch");
 const servers = {};
-const schema = require('./schema.json');
-let {validate} = require('schema-utils');
+const schema = require("./schema.json");
+let { validate } = require("schema-utils");
+const { readFileSync } = require("fs");
 
-const PLUGIN_NAME = 'LiveReloadPlugin';
+const PLUGIN_NAME = "LiveReloadPlugin";
 
 class LiveReloadPlugin {
+  #startTime = new Date();
+
   constructor(options = {}) {
     // Fallback to schema-utils v1 for webpack v4
     if (!validate)
-      validate = require('schema-utils');
+      validate = require("schema-utils");
 
-    validate(schema, options, {name: 'Livereload Plugin'});
+    validate(schema, options, {name: "Livereload Plugin"});
 
     this.defaultPort = 35729;
     this.options = Object.assign({
-      protocol: '',
+      protocol: "",
       port: this.defaultPort,
       hostname: '" + location.hostname + "',
       ignore: null,
@@ -139,27 +143,46 @@ class LiveReloadPlugin {
   }
 
   /**
+   * Calculates the MD5 hash for a given file
+   * @param {string} filename The file name
+   * @returns {string}
+   */
+  #md5File(filename) {
+    const sum = crypto.createHash("md5");
+    const contents = readFileSync(filename);
+    
+    sum.update(contents);
+
+    return sum.digest("hex");
+  }
+
+  /**
    * @private
-   * @param compilation
+   * @param {import("webpack").Compilation} compilation
    */
   _afterEmit(compilation) {
-    const hash = compilation.hash;
-    const childHashes = (compilation.children || []).map(child => child.hash);
+    const fileHashes = {};
+    this.fileHashes = this.fileHashes || {};
 
-    const include = Object.entries(compilation.assets)
-        .filter(this._fileIgnoredOrNotEmitted.bind(this))
-        .filter(this._fileSizeDoesntMatch.bind(this))
-        .filter(this._fileHashDoesntMatch.bind(this))
-        .map((data) => data[0])
-    ;
+    compilation.getAssets().forEach((asset) => {
+      const assetPath = path.resolve(compilation.compiler.outputPath, asset.name);
 
-    if (
-        this._isRunning()
-        && include.length > 0
-        && (hash !== this.lastHash || !LiveReloadPlugin.arraysEqual(childHashes, this.lastChildHashes))
-    ) {
-      this.lastHash = hash;
-      this.lastChildHashes = childHashes;
+      fileHashes[asset.name] = this.#md5File(
+        assetPath
+      );
+    });
+
+    const include = Object.keys(fileHashes).filter(file => {
+      if (this.options.ignore && file.match(this.options.ignore)) {
+        return false;
+      }
+
+      return !(file in this.fileHashes) || this.fileHashes[file] !== fileHashes[file];
+    });
+
+    if (this._isRunning() && include.length) {
+      this.fileHashes = fileHashes;
+      this.logger.info("Reloading " + include.join(", "));
       setTimeout(() => {
         this.server.notifyClients(include);
       }, this.options.delay);
